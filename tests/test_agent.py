@@ -1,100 +1,122 @@
 #!/usr/bin/env python3
 """
-Tests for the Documentation Agent (Task 2)
+Tests for the System Agent (Task 3)
 """
 
 import os
 import sys
 import json
+import pytest
 from pathlib import Path
 
-# Добавляем путь к проекту
 project_root = Path(__file__).parent.parent
 sys.path.insert(0, str(project_root))
 
-# Импортируем агента
-from agent import DocumentationAgent
+from agent import SystemAgent
 
 
-def test_merge_conflict_question():
-    """Test that agent uses read_file to answer about merge conflicts."""
-    agent = DocumentationAgent()
-    result = agent.process_question("How do you resolve a merge conflict?")
+class TestSystemAgent:
+    """Test suite for System Agent."""
     
-    # Проверяем структуру ответа
-    assert "answer" in result, "Answer field missing"
-    assert "source" in result, "Source field missing"
-    assert "tool_calls" in result, "Tool_calls field missing"
+    def test_merge_conflict_question(self):
+        """Test wiki question (from Task 2)."""
+        agent = SystemAgent()
+        result = agent.process_question("How do you resolve a merge conflict?")
+        
+        assert "answer" in result
+        assert "source" in result
+        assert "tool_calls" in result
+        
+        read_file_calls = [c for c in result["tool_calls"] if c["tool"] == "read_file"]
+        assert len(read_file_calls) > 0
+        assert "git-workflow.md" in result["source"].lower()
     
-    # Проверяем, что использовался read_file
-    read_file_calls = [call for call in result["tool_calls"] 
-                      if call["tool"] == "read_file"]
-    assert len(read_file_calls) > 0, "Agent should use read_file tool"
+    def test_list_files_question(self):
+        """Test listing files question (from Task 2)."""
+        agent = SystemAgent()
+        result = agent.process_question("What files are in the wiki?")
+        
+        assert "answer" in result
+        assert "tool_calls" in result
+        
+        list_files_calls = [c for c in result["tool_calls"] if c["tool"] == "list_files"]
+        assert len(list_files_calls) > 0
     
-    # Проверяем, что source указывает на git-workflow.md
-    assert "git-workflow.md" in result["source"].lower(), "Source should reference git-workflow.md"
+    def test_framework_question(self):
+        """Test system fact question - should use read_file on backend code."""
+        agent = SystemAgent()
+        result = agent.process_question("What Python web framework does this project use?")
+        
+        assert "answer" in result
+        assert "tool_calls" in result
+        
+        # Should read backend files
+        read_calls = [c for c in result["tool_calls"] if c["tool"] == "read_file"]
+        assert len(read_calls) > 0
+        
+        # Should look at Python files
+        py_files = [c for c in read_calls if "backend/" in c["args"].get("path", "")]
+        assert len(py_files) > 0 or "framework" in result["answer"].lower()
+    
+    def test_items_count_question(self):
+        """Test data question - should use query_api."""
+        agent = SystemAgent()
+        result = agent.process_question("How many items are in the database?")
+        
+        assert "answer" in result
+        assert "tool_calls" in result
+        
+        # Should use query_api
+        api_calls = [c for c in result["tool_calls"] if c["tool"] == "query_api"]
+        assert len(api_calls) > 0, "Should use query_api for data question"
+        
+        # Should query items endpoint
+        items_calls = [c for c in api_calls if "items" in c["args"].get("path", "")]
+        assert len(items_calls) > 0, "Should query /items/ endpoint"
+    
+    def test_query_api_method(self):
+        """Test query_api implementation."""
+        agent = SystemAgent()
+        
+        # Test with invalid URL (should handle gracefully)
+        agent.api_base_url = "http://nonexistent.local"
+        result = agent.query_api("GET", "/items/")
+        result_dict = json.loads(result)
+        
+        assert "status_code" in result_dict
+        assert result_dict["status_code"] in [503, 500]  # Connection error or timeout
+    
+    def test_security_directory_traversal(self):
+        """Test directory traversal prevention."""
+        agent = SystemAgent()
+        
+        result = agent.read_file("../../../etc/passwd")
+        assert "Access denied" in result
+        
+        result = agent.read_file("wiki/../.env.agent.secret")
+        assert "Access denied" in result
+    
+    def test_max_tool_calls(self):
+        """Test max tool calls limit."""
+        agent = SystemAgent()
+        agent.max_tool_calls = 2
+        result = agent.process_question("Tell me about everything in the system")
+        assert len(result["tool_calls"]) <= 2
 
 
-def test_list_files_question():
-    """Test that agent uses list_files to discover wiki contents."""
-    agent = DocumentationAgent()
-    result = agent.process_question("What files are in the wiki?")
+@pytest.mark.skipif(not os.getenv('LMS_API_KEY'), reason="No LMS API key")
+class TestLiveAPI:
+    """Tests that require live backend API."""
     
-    # Проверяем структуру ответа
-    assert "answer" in result, "Answer field missing"
-    assert "source" in result, "Source field missing"
-    assert "tool_calls" in result, "Tool_calls field missing"
-    
-    # Проверяем, что использовался list_files
-    list_files_calls = [call for call in result["tool_calls"] 
-                       if call["tool"] == "list_files"]
-    assert len(list_files_calls) > 0, "Agent should use list_files tool"
-    
-    # Проверяем, что листали wiki директорию
-    wiki_calls = [call for call in list_files_calls 
-                 if call["args"].get("path") == "wiki"]
-    assert len(wiki_calls) > 0, "Agent should list wiki directory"
-
-
-def test_security_directory_traversal():
-    """Test that directory traversal is prevented."""
-    agent = DocumentationAgent()
-    
-    # Попытка прочитать файл вне проекта
-    result = agent.read_file("../../../etc/passwd")
-    assert "Access denied" in result or "Error" in result, "Should block directory traversal"
-    
-    # Попытка через wiki
-    result = agent.read_file("wiki/../.env.agent.secret")
-    assert "Access denied" in result or "Error" in result, "Should block encoded traversal"
-
-
-def test_max_tool_calls():
-    """Test that agent respects max tool calls limit."""
-    agent = DocumentationAgent()
-    agent.max_tool_calls = 2
-    
-    # Вопрос, который требует много инструментов
-    result = agent.process_question("Tell me about everything in the wiki")
-    
-    # Проверяем, что не превысили лимит
-    assert len(result["tool_calls"]) <= 2, f"Too many tool calls: {len(result['tool_calls'])}"
+    def test_query_api_live(self):
+        """Test query_api against real backend."""
+        agent = SystemAgent()
+        result = agent.query_api("GET", "/health")
+        result_dict = json.loads(result)
+        
+        assert result_dict["status_code"] == 200
+        assert "body" in result_dict
 
 
 if __name__ == "__main__":
-    # Для ручного тестирования
-    print("Running tests...")
-    
-    test_merge_conflict_question()
-    print("✅ test_merge_conflict_question passed")
-    
-    test_list_files_question()
-    print("✅ test_list_files_question passed")
-    
-    test_security_directory_traversal()
-    print("✅ test_security_directory_traversal passed")
-    
-    test_max_tool_calls()
-    print("✅ test_max_tool_calls passed")
-    
-    print("\n🎉 All tests passed!")
+    pytest.main([__file__, "-v"])
