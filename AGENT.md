@@ -1,4 +1,8 @@
-# Agent CLI Documentation
+# Documentation Agent CLI
+
+## Overview
+
+The Documentation Agent is an AI assistant that can navigate and read documentation files to answer questions. Unlike a simple chatbot, it has **tools** that allow it to interact with the file system.
 
 ## Setup
 
@@ -9,4 +13,4 @@
 ## Usage
 
 ```bash
-uv run agent.py "Your question here"
+uv run agent.py "How do you resolve a merge conflict?"
